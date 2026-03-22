@@ -68,3 +68,21 @@ This section has moved here: [https://facebook.github.io/create-react-app/docs/d
 ### `npm run build` fails to minify
 
 This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+
+---
+
+## SOC Dashboard Customizations
+
+This repository is the frontend for the SOC project. It has been extended with:
+
+- **Routing & Layout:** React Router with sidebar navigation and protected routes.
+- **Authentication Context:** JWT handling, auto-logout on expiry/401, and global user state.
+- **Forms:** login/register with validation, error feedback, ARIA labels.
+- **Pages:** dashboard, profile, and a stubbed forgot-password flow.
+- **Alerts Table:** filtering, pagination, column sorting, CSV export, accessibility.
+- **Environment:** `REACT_APP_API_URL` required; falls back to `window.REACT_APP_API_URL`.
+- **PropTypes:** added to components for runtime type checking.
+- **Unit tests:** simple tests for login, register and alerts components.
+- **Responsive design & accessibility** improvements (ARIA, keyboard navigation, media queries).
+
+Refer to the top-level README for overall architecture and env setup.

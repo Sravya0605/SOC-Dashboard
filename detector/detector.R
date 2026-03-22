@@ -1,247 +1,413 @@
-library(mongolite)
-library(dplyr)
-library(lubridate)
-library(isotree)
-library(digest)
-library(jsonlite)
-library(RcppRedis)   # ← FIXED: correct Redis client
+# ---------- PACKAGE LOADER ----------
+pkgs <- c("mongolite","dplyr","lubridate","isotree","digest",
+          "jsonlite","RcppRedis","config","logger","R6")
 
-# ---------- ENV ----------
-mongo_uri  <- "mongodb://127.0.0.1:27017"
-redis_host <- "127.0.0.1"
-redis_port <- 6379
-dedup_salt <- "supersecret"
+invisible(lapply(pkgs, function(p){
+  if (!requireNamespace(p, quietly = TRUE))
+    install.packages(p, dependencies = TRUE)
+  library(p, character.only = TRUE)
+}))
 
-WINDOW_MINUTES  <- 30
-RETRAIN_MINUTES <- 10
-DEDUP_TTL_SEC   <- 600
-MAX_BUFFER_ROWS <- 50000
+# ---------- HELPERS ----------
+`%||%` <- function(a,b) if(!is.null(a) && length(a)>0) a else b
 
-MODEL_PATH <- "model.rds"
-CHECKPOINT_KEY <- "detector:last_id"
+# ---------- CONFIG ----------
+conf <- list(
+  mongo_uri      = Sys.getenv("MONGO_URI","mongodb://127.0.0.1:27017"),
+  redis_host     = Sys.getenv("REDIS_HOST","127.0.0.1"),
+  redis_port     = as.numeric(Sys.getenv("REDIS_PORT",6379)),
+  # sliding window for training (minutes); smaller = responds to drift faster
+  window_mins    = as.numeric(Sys.getenv("WINDOW_MINS",5)),
+  # how often to retrain (minutes)
+  retrain_mins   = as.numeric(Sys.getenv("RETRAIN_MINS",1)),
+  # minimum rows needed before training kicks in
+  train_min_rows = as.numeric(Sys.getenv("TRAIN_MIN_ROWS",50)),
+  max_buffer     = 50000,
+  dedup_ttl      = 600,
+  model_path     = "models/iso_forest_v1.rds",
+  stream_name    = "soc_logs",
+  checkpoint_key = "detector:last_id",
+  throttle_sec   = as.numeric(Sys.getenv("THROTTLE_SEC",0.02)),
+  alert_limit    = as.numeric(Sys.getenv("ALERT_LIMIT",1000))
+)
 
-# ---------- LOGGING ----------
-log_json <- function(level, msg) {
-  cat(toJSON(list(level = level, time = as.character(Sys.time()), msg = msg),
-             auto_unbox = TRUE), "\n")
-}
+log_threshold(INFO)
+
+# ---------- DETECTOR ----------
+SOCDetector <- R6::R6Class("SOCDetector",
+
+public = list(
+
+  model=NULL,
+  last_train=NULL,
+  buffer=NULL,
+  redis=NULL,
+  mongo=NULL,
+  model_ver="none",
+  scale_center=NULL,
+  scale_scale=NULL,
+
+  initialize=function(){
+    self$buffer <- tibble()
+    self$connect_services()
+    self$load_existing_model()
+  },
 
 # ---------- CONNECTIONS ----------
-alerts_db <- mongo("alerts", db = "soc", url = mongo_uri)
 
-redis <- tryCatch({
-  r <- new(Redis, redis_host, redis_port)
-  log_json("info", "Connected to Redis")
-  r
-}, error = function(e) {
-  log_json("error", paste("Redis connection failed:", e$message))
-  NULL
-})
+connect_services=function(){
 
-# ---------- MODEL ----------
-train_model <- function(df) {
-  if (nrow(df) < 50) return(NULL)
-  isolation.forest(df[, c("failed_logins", "hour")], ntrees = 100)
-}
+  tryCatch({
+    self$redis <- new(Redis,conf$redis_host,conf$redis_port)
+  },error=function(e){
+    log_warn("Redis connection failed")
+  })
 
-save_model <- function(m) saveRDS(m, MODEL_PATH)
-load_model <- function() if (file.exists(MODEL_PATH)) readRDS(MODEL_PATH) else NULL
+  tryCatch({
+    self$mongo <- mongo("alerts",db="soc",url=conf$mongo_uri)
+  },error=function(e){
+    log_warn("Mongo connection failed")
+  })
 
-score_severity <- function(score, fails) {
-  base <- case_when(score > 0.75 ~ 3, score > 0.6 ~ 2, TRUE ~ 1)
-  total <- base + ifelse(fails >= 5, 1, 0)
+},
 
-  case_when(
-    total >= 4 ~ "critical",
-    total == 3 ~ "high",
-    total == 2 ~ "medium",
-    TRUE ~ "low"
+safe_redis_exec=function(cmd){
+
+  tryCatch({
+
+    if(is.null(self$redis))
+      self$connect_services()
+
+    self$redis$exec(cmd)
+
+  },error=function(e){
+
+    log_warn("Redis reconnect triggered")
+    self$connect_services()
+    NULL
+
+  })
+},
+
+safe_mongo_insert=function(df){
+
+  tryCatch({
+
+    if(is.null(self$mongo))
+      self$mongo <- mongo("alerts",db="soc",url=conf$mongo_uri)
+
+    self$mongo$insert(df)
+
+  },error=function(e){
+
+    log_warn("Mongo reconnect triggered")
+    self$mongo <- mongo("alerts",db="soc",url=conf$mongo_uri)
+
+  })
+},
+
+# ---------- FEATURE ENGINEERING ----------
+
+enrich_features=function(df){
+
+  if(nrow(df)==0) return(df)
+
+  df %>%
+    mutate(
+      timestamp=suppressWarnings(
+        as.POSIXct(as.numeric(timestamp),
+                   origin="1970-01-01",
+                   tz="UTC")),
+      failed_logins=suppressWarnings(as.numeric(failed_logins))
+    ) %>%
+    filter(!is.na(timestamp),!is.na(failed_logins)) %>%
+    mutate(
+      hour=hour(timestamp),
+      is_weekend=as.integer(wday(timestamp) %in% c(1,7))
+    )
+
+},
+
+# ---------- MODEL TRAINING ----------
+
+train=function(){
+
+  train_data <- self$buffer %>%
+    filter(timestamp>=Sys.time()-minutes(conf$window_mins))
+
+  # require a minimum number of rows before we bother training
+  if(nrow(train_data) < conf$train_min_rows) return(NULL)
+
+  log_info("Training model on {nrow(train_data)} rows (window={conf$window_mins}m)")
+
+  self$scale_center <- attr(scaled,"scaled:center")
+  self$scale_scale  <- attr(scaled,"scaled:scale")
+
+  self$model <- isolation.forest(scaled,ntrees=100,ndim=1)
+
+  self$last_train <- Sys.time()
+
+  self$model_ver <- paste0(
+    "iso_v1_",
+    format(self$last_train,"%Y%m%d_%H%M")
   )
+
+  if(!dir.exists("models"))
+    dir.create("models")
+
+  saveRDS(list(
+    model=self$model,
+    center=self$scale_center,
+    scale=self$scale_scale
+  ),conf$model_path)
+
+},
+
+load_existing_model=function(){
+
+  if(file.exists(conf$model_path)){
+
+    obj <- readRDS(conf$model_path)
+
+    self$model <- obj$model
+    self$scale_center <- obj$center
+    self$scale_scale  <- obj$scale
+
+    self$last_train <- file.info(conf$model_path)$mtime
+
+    self$model_ver <- paste0(
+      "iso_v1_",
+      format(self$last_train,"%Y%m%d_%H%M")
+    )
+
+    log_info("Loaded model {self$model_ver}")
+
+  }
+
+},
+
+# ---------- STREAM READING ----------
+
+process_stream=function(){
+
+  last_id <- self$get_checkpoint()
+
+  cmd <- paste(
+    "XREAD COUNT 100 BLOCK 2000 STREAMS",
+    conf$stream_name,
+    last_id
+  )
+
+  raw <- self$safe_redis_exec(cmd)
+
+  entries <- tryCatch(raw[[1]][[2]],error=function(e)NULL)
+
+  if(is.null(entries)||length(entries)==0) return(NULL)
+
+  rows <- lapply(entries,function(e){
+
+    entry_id <- e[[1]]
+    fields <- e[[2]]
+
+    data <- list()
+    i<-1
+
+    while(i<length(fields)){
+
+      data[[fields[[i]]]] <- fields[[i+1]]
+      i<-i+2
+
+    }
+
+    data$entry_id <- entry_id
+    data
+
+  }) %>% bind_rows()
+
+  self$handle_batch(rows)
+
+  Sys.sleep(conf$throttle_sec)
+
+},
+
+# ---------- PROCESS BATCH ----------
+
+handle_batch=function(df){
+
+  enriched <- self$enrich_features(df)
+
+  if(nrow(enriched)==0) return(NULL)
+
+  self$buffer <- bind_rows(self$buffer,enriched) %>%
+    filter(timestamp>=Sys.time()-minutes(conf$window_mins))
+
+  if(nrow(self$buffer)>conf$max_buffer)
+    self$buffer <- tail(self$buffer,conf$max_buffer)
+
+  if(is.null(self$model) ||
+     difftime(Sys.time(),self$last_train,
+              units="mins")>conf$retrain_mins){
+
+    self$train()
+
+  }
+
+  if(!is.null(self$model)){
+
+    feats <- enriched %>%
+      select(failed_logins,hour,is_weekend)
+
+    scaled <- scale(feats,
+                    center=self$scale_center,
+                    scale=self$scale_scale)
+
+    scores <- predict(self$model,scaled)
+
+    self$generate_alerts(enriched,scores)
+
+  }
+
+  self$set_checkpoint(df$entry_id[nrow(df)])
+
+},
+
+# ---------- ALERT GENERATION ----------
+
+generate_alerts=function(df,scores){
+
+  alerts <- list()
+
+  for(i in seq_len(nrow(df))){
+
+    score_val <- scores[i]
+
+    if(!(score_val>0.75 |
+       (df$failed_logins[i] %||% 0)>20))
+      next
+
+    user_val <- df$user[i] %||% "unknown"
+    ip_val   <- df$ip[i]   %||% "0.0.0.0"
+    host_val <- df$hostname[i] %||% "unknown"
+
+    hash_key <- digest(
+      paste(user_val,ip_val,floor(score_val*10))
+    )
+
+    if(self$is_duplicate(hash_key))
+      next
+
+    self$mark_duplicate(hash_key)
+
+    alerts[[length(alerts)+1]] <- list(
+
+      timestamp=df$timestamp[i],
+      user=user_val,
+      ip=ip_val,
+      hostname=host_val,
+      score=score_val,
+      severity=if(score_val>0.85)"critical" else "high",
+      model_ver=self$model_ver
+
+    )
+
+  }
+
+  if(length(alerts)==0) return()
+
+  if(length(alerts)>conf$alert_limit){
+
+    log_warn("Alert spike detected, truncating batch")
+    alerts <- alerts[1:conf$alert_limit]
+
+  }
+
+  self$safe_mongo_insert(bind_rows(alerts))
+
+},
+
+# ---------- REDIS HELPERS ----------
+
+get_checkpoint=function(){
+
+  id <- self$safe_redis_exec(
+    paste("GET",conf$checkpoint_key)
+  )
+
+  id %||% "0-0"
+
+},
+
+set_checkpoint=function(id){
+
+  self$safe_redis_exec(
+    paste("SET",conf$checkpoint_key,id)
+  )
+
+},
+
+is_duplicate=function(h){
+
+  (self$safe_redis_exec(
+    paste("EXISTS",paste0("dedup:",h))
+  ) %||% 0)==1
+
+},
+
+mark_duplicate=function(h){
+
+  self$safe_redis_exec(
+    paste("SETEX",
+          paste0("dedup:",h),
+          conf$dedup_ttl,
+          "1")
+  )
+
 }
 
-# ---------- DEDUP (via Redis) ----------
-is_duplicate <- function(hash) {
-  if (is.null(redis)) return(FALSE)
-  tryCatch({
-    res <- redis$exec(paste("EXISTS", paste0("dedup:", hash)))
-    as.numeric(res) == 1
-  }, error = function(e) FALSE)
-}
+))
 
-store_hash <- function(hash) {
-  if (is.null(redis)) return()
-  tryCatch({
-    redis$exec(paste("SETEX", paste0("dedup:", hash), DEDUP_TTL_SEC, "1"))
-  }, error = function(e) {})
-}
+# ---------- MAIN LOOP ----------
 
-# ---------- CHECKPOINT ----------
-get_last_id <- function() {
-  if (is.null(redis)) return("0-0")
-  tryCatch({
-    id <- redis$exec(paste("GET", CHECKPOINT_KEY))
-    if (is.null(id)) "0-0" else id
-  }, error = function(e) "0-0")
-}
-
-set_last_id <- function(id) {
-  if (is.null(redis)) return()
-  tryCatch({
-    redis$exec(paste("SET", CHECKPOINT_KEY, id))
-  }, error = function(e) {})
-}
-
-# ---------- STATE ----------
-iso_model <- load_model()
-last_train_time <- Sys.time()
-
-log_buffer <- tibble(
-  timestamp = as.POSIXct(character()),
-  failed_logins = numeric(),
-  hour = numeric()
-)
+detector <- SOCDetector$new()
 
 running <- TRUE
 error_count <- 0
-MAX_ERRORS <- 10
 
-base::addTaskCallback(function(...) TRUE)
-withCallingHandlers({ NULL }, interrupt = function(e) {
-  running <<- FALSE
-})
+log_info("SOC detector started")
 
-log_json("info", "Detector started")
+withCallingHandlers({
 
-# ---------- LOOP ----------
-while (running) {
+  while(running){
 
-  tryCatch({
+    tryCatch({
 
-    if (is.null(redis)) {
-      Sys.sleep(3)
-      next
-    }
+      detector$process_stream()
+      error_count <- 0
 
-    last_id <- get_last_id()
+    },error=function(e){
 
-    # ---------- XREAD ----------
-    msgs <- tryCatch({
-      redis$exec(
-        paste("XREAD COUNT 100 BLOCK 2000 STREAMS soc_logs", last_id)
-      )
-    }, error = function(e) {
-      log_json("error", paste("XREAD error:", e$message))
-      Sys.sleep(0.5)
-      NULL
+      error_count <<- error_count+1
+
+      log_error("Loop error: {e$message}")
+
+      if(error_count>10){
+
+        log_fatal("Too many errors, shutting down")
+        running <<- FALSE
+
+      }
+
+      Sys.sleep(min(30,2^error_count))
+
     })
 
-    if (is.null(msgs) || length(msgs) == 0) next
+  }
 
-    # ---------- PARSE STREAM ----------
-    records <- list()
-    entry_ids <- c()
+},interrupt=function(e){
 
-    entries <- msgs[[1]][[2]]
+  log_info("Graceful shutdown")
+  running <<- FALSE
 
-    for (entry in entries) {
+})
 
-      entry_id <- entry[[1]]
-      fields_list <- entry[[2]]
-
-      data_list <- list()
-      j <- 1
-      while (j < length(fields_list)) {
-        data_list[[fields_list[[j]]]] <- fields_list[[j + 1]]
-        j <- j + 2
-      }
-
-      record <- as.data.frame(data_list, stringsAsFactors = FALSE)
-      records[[length(records) + 1]] <- record
-      entry_ids <- c(entry_ids, entry_id)
-    }
-
-    if (length(records) == 0) next
-
-    new_logs <- bind_rows(records)
-
-    # ---------- CHECKPOINT ----------
-    set_last_id(entry_ids[length(entry_ids)])
-
-    # ---------- TYPE CONVERSION ----------
-    new_logs$timestamp <- as.POSIXct(as.numeric(new_logs$timestamp),
-                                     origin = "1970-01-01", tz = "UTC")
-    new_logs$failed_logins <- as.numeric(new_logs$failed_logins)
-    new_logs$hour <- hour(new_logs$timestamp)
-
-    # ---------- BUFFER ----------
-    log_buffer <- bind_rows(log_buffer, new_logs)
-
-    cutoff <- Sys.time() - minutes(WINDOW_MINUTES)
-    log_buffer <- log_buffer %>% filter(timestamp >= cutoff)
-
-    if (nrow(log_buffer) > MAX_BUFFER_ROWS)
-      log_buffer <- tail(log_buffer, MAX_BUFFER_ROWS)
-
-    # ---------- RETRAIN ----------
-    if (is.null(iso_model) ||
-        difftime(Sys.time(), last_train_time, units = "mins") > RETRAIN_MINUTES) {
-
-      model <- train_model(log_buffer)
-
-      if (!is.null(model)) {
-        iso_model <- model
-        last_train_time <- Sys.time()
-        save_model(model)
-        log_json("info", "Model retrained")
-      }
-    }
-
-    if (is.null(iso_model)) next
-
-    # ---------- SCORING ----------
-    scores <- predict(iso_model, new_logs[, c("failed_logins", "hour")])
-
-    alerts <- list()
-
-    for (i in seq_len(nrow(new_logs))) {
-
-      sev <- score_severity(scores[i], new_logs$failed_logins[i])
-      if (sev == "low") next
-
-      hash <- digest(paste(new_logs$user[i], new_logs$ip[i], sev, dedup_salt))
-
-      if (is_duplicate(hash)) next
-      store_hash(hash)
-
-      alerts[[length(alerts) + 1]] <- list(
-        timestamp = new_logs$timestamp[i],
-        user = new_logs$user[i],
-        ip = new_logs$ip[i],
-        failed_logins = new_logs$failed_logins[i],
-        anomaly_score = scores[i],
-        severity = sev
-      )
-    }
-
-    if (length(alerts) > 0) {
-      alerts_db$insert(bind_rows(alerts))
-      log_json("info", paste("Stored", length(alerts), "alerts"))
-    }
-
-    error_count <- 0
-
-  }, error = function(e) {
-
-    error_count <<- error_count + 1
-    log_json("error", e$message)
-
-    if (error_count >= MAX_ERRORS) {
-      log_json("error", "Too many errors, shutting down")
-      running <<- FALSE
-    }
-
-    Sys.sleep(min(30, 2 ^ error_count))
-  })
-}
-
-log_json("info", "Detector stopped")
+log_info("Detector stopped")

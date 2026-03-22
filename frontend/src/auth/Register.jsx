@@ -1,7 +1,19 @@
 import { useState } from "react";
+import { useAuth } from "../context/AuthContext";
 
-export default function Register({ onRegister, onSwitchToLogin }) {
-  const [form, setForm] = useState({ username: "", password: "", confirmPassword: "" });
+export default function Register({ navigate: propNavigate }) {
+  const { register } = useAuth();
+
+  let navigate = propNavigate;
+  try {
+    const { useNavigate } = require("react-router-dom");
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const hookNav = useNavigate();
+    navigate = navigate || hookNav;
+  } catch {
+    navigate = navigate || (() => {});
+  }
+  const [form, setForm] = useState({ username: "", password: "", confirmPassword: "", role: "analyst" });
   const [error, setError] = useState("");
 
   const submit = async e => {
@@ -24,7 +36,8 @@ export default function Register({ onRegister, onSwitchToLogin }) {
     }
 
     try {
-      await onRegister(form.username, form.password);
+      await register(form.username, form.password, form.role);
+      navigate("/");
     } catch (err) {
       setError(err.response?.data?.error || "Registration failed");
     }
@@ -35,27 +48,54 @@ export default function Register({ onRegister, onSwitchToLogin }) {
       <form className="card login" onSubmit={submit}>
         <h2>Create Account</h2>
 
-        <input
-          placeholder="Username"
-          value={form.username}
-          onChange={e => setForm({ ...form, username: e.target.value })}
-        />
+        <label>
+          Username
+          <input
+            placeholder="Username"
+            aria-label="username"
+            value={form.username}
+            onChange={e => setForm({ ...form, username: e.target.value })}
+            required
+          />
+        </label>
 
-        <input
-          type="password"
-          placeholder="Password"
-          value={form.password}
-          onChange={e => setForm({ ...form, password: e.target.value })}
-        />
+        <label>
+          Password
+          <input
+            type="password"
+            placeholder="Password"
+            aria-label="password"
+            value={form.password}
+            onChange={e => setForm({ ...form, password: e.target.value })}
+            required
+          />
+        </label>
 
-        <input
-          type="password"
-          placeholder="Confirm Password"
-          value={form.confirmPassword}
-          onChange={e => setForm({ ...form, confirmPassword: e.target.value })}
-        />
+        <label>
+          Confirm Password
+          <input
+            type="password"
+            placeholder="Confirm Password"
+            aria-label="confirm-password"
+            value={form.confirmPassword}
+            onChange={e => setForm({ ...form, confirmPassword: e.target.value })}
+            required
+          />
+        </label>
 
-        {error && <p className="error">{error}</p>}
+        <label>
+          Role
+          <select
+            value={form.role}
+            onChange={e => setForm({ ...form, role: e.target.value })}
+            aria-label="role"
+          >
+            <option value="analyst">Analyst</option>
+            <option value="admin">Admin</option>
+          </select>
+        </label>
+
+        {error && <p className="error" role="alert">{error}</p>}
 
         <button className="btn full">Register</button>
 
@@ -63,7 +103,7 @@ export default function Register({ onRegister, onSwitchToLogin }) {
           Already have an account?{" "}
           <button
             type="button"
-            onClick={onSwitchToLogin}
+            onClick={() => navigate("/login")}
             style={{ background: "none", border: "none", color: "#3b82f6", cursor: "pointer" }}
           >
             Login

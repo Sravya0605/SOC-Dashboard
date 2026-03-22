@@ -18,15 +18,54 @@ body {
 }
 
 .page {
+  display: flex;
+  flex-direction: column;
   max-width: 1400px;
   margin: auto;
   padding: 24px;
 }
 
+/* primary site header */
 .header {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  background: var(--card);
+  padding: 12px 24px;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
   margin-bottom: 24px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+/* utility helper used in layout component */
+.logout-btn {
+  margin-left: auto;
+}
+
+/* navigation links in header */
+.nav {
+  display: flex;
+  gap: 16px;
+  margin-left: 24px;
+}
+
+.nav a {
+  color: var(--text);
+  text-decoration: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.nav a:hover {
+  background: var(--border);
+}
+
+.nav a.active {
+  background: #3b82f6;
 }
 
 .title {
@@ -42,6 +81,16 @@ body {
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 18px;
+}
+
+/* tiny inline sparkline container inside metric card */
+.card.metric {
+  position: relative;
+  overflow: hidden;
+}
+.card.metric .metric-value {
+  position: relative;
+  z-index: 1;
 }
 
 .grid {
@@ -187,14 +236,44 @@ tbody tr:hover {
 }
 
 /* Responsive Design */
+/* multi-chart row (desktop two‑column) */
+.chart-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
 @media (max-width: 768px) {
   .page {
+    flex-direction: column;
     padding: 16px;
   }
 
   .header {
     flex-direction: column;
+    align-items: flex-start;
     gap: 12px;
+  }
+  .chart-row {
+    grid-template-columns: 1fr;
+  }
+
+  .nav {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .logout-btn {
+    margin-left: 0;
+  }
+
+  .sidebar a.active {
+    font-weight: bold;
+    color: #3b82f6;
+  }
+
+  main {
+    flex: 1;
   }
 
   .title {

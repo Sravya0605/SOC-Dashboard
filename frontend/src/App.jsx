@@ -1,72 +1,55 @@
-import { useEffect, useState } from "react";
-import { api } from "./api/client";
-import { useAuth } from "./auth/useAuth";
+import React from "react";
+import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
+import { AuthProvider, useAuth } from "./context/AuthContext";
+import Layout from "./components/Layout";
 
+// pages
 import Login from "./auth/Login";
 import Register from "./auth/Register";
-import Header from "./components/Header";
-import AlertsTable from "./components/AlertsTable";
-import MetricsCards from "./components/MetricsCards";
-import SeverityChart from "./components/SeverityChart";
-import Loading from "./components/Loading";
+import DashboardPage from "./pages/DashboardPage";
+import ProfilePage from "./pages/ProfilePage";
+import ForgotPasswordPage from "./pages/ForgotPasswordPage";
 import ErrorBoundary from "./components/ErrorBoundary";
 
+function PrivateRoute({ children }) {
+  const { user } = useAuth();
+  if (!user) return <Navigate to="/login" replace />;
+  return children;
+}
+
 export default function App() {
-  const { user, login, register, logout } = useAuth();
-  const [isRegistering, setIsRegistering] = useState(false);
-
-  const [metrics, setMetrics] = useState(null);
-  const [alerts, setAlerts] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    if (!user) return;
-
-    const load = async () => {
-      try {
-        setLoading(true);
-
-        const [m, a] = await Promise.all([
-          api.get("/metrics"),
-          api.get("/alerts")
-        ]);
-
-        setMetrics(m.data);
-        setAlerts(a.data.alerts);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    load();
-    const id = setInterval(load, 5000);
-    return () => clearInterval(id);
-  }, [user]);
-
-  if (!user) {
-    return isRegistering ? (
-      <Register onRegister={register} onSwitchToLogin={() => setIsRegistering(false)} />
-    ) : (
-      <Login onLogin={login} onSwitchToRegister={() => setIsRegistering(true)} />
-    );
-  }
-  if (loading || !metrics) return <Loading />;
-
   return (
-    <ErrorBoundary>
-      <div className="page">
-        <Header onLogout={logout} />
+    <AuthProvider>
+      <ErrorBoundary>
+        <Router>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/register" element={<Register />} />
+            <Route path="/forgot" element={<ForgotPasswordPage />} />
+            <Route
+              path="/*"
+              element={
+                <PrivateRoute>
+                  <LayoutWrapper />
+                </PrivateRoute>
+              }
+            />
+          </Routes>
+        </Router>
+      </ErrorBoundary>
+    </AuthProvider>
+  );
+}
 
-        <MetricsCards metrics={metrics} />
-
-        <div className="section">
-          <SeverityChart data={metrics.perSeverity} />
-        </div>
-
-        <div className="section">
-          <AlertsTable alerts={alerts} />
-        </div>
-      </div>
-    </ErrorBoundary>
+function LayoutWrapper() {
+  const { logout } = useAuth();
+  return (
+    <Layout onLogout={logout}>
+      <Routes>
+        <Route path="/" element={<DashboardPage />} />
+        <Route path="/profile" element={<ProfilePage />} />
+        <Route path="/forgot" element={<ForgotPasswordPage />} />
+      </Routes>
+    </Layout>
   );
 }

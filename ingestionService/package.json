@@ -16,6 +16,8 @@
     "express-rate-limit": "^8.2.1",
     "ioredis": "^5.9.3",
     "joi": "^18.0.2",
-    "mongodb": "^6.21.0"
+    "mongodb": "^6.21.0",
+    "pino": "^8.20.0",
+    "uuid": "^9.0.0"
   }
 }

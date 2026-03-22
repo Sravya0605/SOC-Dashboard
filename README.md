@@ -15,7 +15,7 @@ A full-stack anomaly detection and security alert platform. Real-time monitoring
                      │
 ┌────────────────────▼────────────────────────────────────────────┐
 │                   Backend (Node.js/Express)                     │
-│                      Port 4000                                  │
+│                      Port 6000                                  │
 │              - Authentication (JWT)                             │
 │              - Alert CRUD + pagination                          │
 │              - Metrics aggregation                              │
@@ -69,7 +69,7 @@ SOC_MONGO_URI=mongodb://localhost:27017
 JWT_SECRET=your-secure-secret
 SOC_API_KEY=your-api-key
 SOC_DEDUP_SALT=your-salt
-REACT_APP_API_URL=http://localhost:4000
+REACT_APP_API_URL=http://localhost:6000
 ALLOWED_ORIGINS=http://localhost:3000
 ```
 
@@ -83,7 +83,7 @@ npm install
 $env:MONGO_URI="mongodb://localhost:27017"
 $env:JWT_SECRET="your-secret"
 npm start
-# Runs on http://localhost:4000
+# Runs on http://localhost:6000
 ```
 
 ### 3. Ingestion Service Setup
@@ -118,7 +118,10 @@ $env:SOC_MONGO_URI="mongodb://localhost:27017"
 $env:SOC_REDIS_HOST="127.0.0.1"
 $env:SOC_REDIS_PORT="6379"
 Rscript detector.R
-```
+
+(The detector now supports faster retraining via env vars. e.g. 
+`WINDOW_MINS=5 RETRAIN_MINS=1 TRAIN_MIN_ROWS=50 Rscript detector.R` will
+rebuild the model every minute using the last five minutes of data.)
 
 **Note:** The detector will auto-load `.env` from its directory when sourced in RStudio or R.
 
@@ -129,7 +132,7 @@ cd frontend
 npm install
 
 # In PowerShell:
-$env:REACT_APP_API_URL="http://localhost:4000"
+$env:REACT_APP_API_URL="http://localhost:6000"
 npm start
 # Runs on http://localhost:3000
 ```
@@ -137,7 +140,7 @@ npm start
 ### 6. Test the System
 
 1. **Register a user** at `http://localhost:3000` (username/password)
-2. **Verify backend** is running: `curl http://localhost:4000/metrics` (should return 401 if not auth'd)
+2. **Verify backend** is running: `curl http://localhost:6000/metrics` (should return 401 if not auth'd)
 3. **Send a test log** to ingestion:
    ```bash
    $headers = @{"x-api-key" = "your-api-key"}
@@ -155,6 +158,10 @@ npm start
    redis-cli XREAD STREAMS soc_logs 0-0 COUNT 10
    ```
 5. **Alerts appear** in dashboard as detector processes them
+
+* The dashboard now maintains a short history of `alerts/min` and
+  displays a line chart so you can see trends over time. The metrics cards
+  include a tiny sparkline as well.
 
 ## Module Overview
 
@@ -188,6 +195,7 @@ npm start
 - **Features:**
   - API key authentication
   - Rate limiting (100 req/min)
+- Configurable metrics cache (see METRICS_CACHE_MS environment variable)
   - Automatic retry logic with exponential backoff
   - Health endpoint
   - Metrics endpoint

@@ -1,8 +1,14 @@
 let cache = null;
 let cacheTime = 0;
 
+// number of milliseconds to cache results; set to 0 to disable caching entirely
+// default is 0 so that alerts/min always reflects the current minute
+const CACHE_MS = Number(process.env.METRICS_CACHE_MS || 0);
+
 export async function getMetrics(alerts) {
-  if (Date.now() - cacheTime < 5000 && cache) return cache;
+  if (CACHE_MS > 0 && Date.now() - cacheTime < CACHE_MS && cache) {
+    return cache;
+  }
 
   try {
     const [total, perSeverityRaw, alertsPerMin] = await Promise.all([
