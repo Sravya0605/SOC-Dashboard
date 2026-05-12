@@ -9,20 +9,24 @@ const COLORS = {
 };
 
 export default function SeverityChart({ data, style }) {
+  // Ensure data is an array with valid entries
+  const chartData = (data && Array.isArray(data)) ? data : [];
+  
   return (
     <div className="card" style={style}>
       <h3 className="section-title">Severity Distribution</h3>
 
       <ResponsiveContainer width="100%" height={260}>
-        <BarChart data={data}>
+        <BarChart data={chartData}>
           <XAxis dataKey="name" />
           <YAxis />
           <Tooltip />
 
           <Bar dataKey="value">
-            {data.map((d, i) => (
-              <Cell key={i} fill={COLORS[d.name.toLowerCase()] || "#64748b"} />
-            ))}
+            {chartData.map((d, i) => {
+              const severityName = d?.name?.toLowerCase?.() || "unknown";
+              return <Cell key={i} fill={COLORS[severityName] || "#64748b"} />;
+            })}
           </Bar>
         </BarChart>
       </ResponsiveContainer>

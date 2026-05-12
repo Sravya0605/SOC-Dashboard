@@ -243,6 +243,10 @@ tbody tr:hover {
   gap: 16px;
 }
 
+.chart-row > div {
+  min-width: 0;
+}
+
 @media (max-width: 768px) {
   .page {
     flex-direction: column;

@@ -10,6 +10,7 @@ const envSchema = Joi.object({
   JWT_EXPIRES: Joi.string().default("8h"),
   PORT: Joi.number().default(4000),
   ALLOWED_ORIGINS: Joi.string().default("*"),
+  SOC_API_KEY: Joi.string().required(),
 }).unknown();
 
 const { error, value: env } = envSchema.validate(process.env);

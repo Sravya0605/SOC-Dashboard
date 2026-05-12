@@ -97,7 +97,7 @@ export default function DashboardPage() {
         </div>
 
         <div>
-          <SeverityChart data={metrics.perSeverity} style={{ padding: 0, height: 260 }} />
+          <SeverityChart data={metrics?.perSeverity || []} style={{ padding: 0, height: 260 }} />
         </div>
       </div>
 

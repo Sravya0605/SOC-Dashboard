@@ -178,6 +178,32 @@ export function createApp({ db }) {
     }
   });
 
+  app.post("/log", async (req, res) => {
+    const apiKey = req.headers["x-api-key"];
+    if (apiKey !== config.SOC_API_KEY) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { type, payload, timestamp } = req.body;
+    if (!type || !payload) {
+      return res.status(400).json({ error: "type and payload are required" });
+    }
+
+    try {
+      const alert = {
+        type,
+        ...payload,
+        timestamp: timestamp ? new Date(timestamp) : new Date(),
+        createdAt: new Date(),
+      };
+      const result = await alerts.insertOne(alert);
+      res.json({ success: true, id: result.insertedId });
+    } catch (err) {
+      console.error("Error inserting alert:", err);
+      res.status(500).json({ error: "Server error: " + err.message });
+    }
+  });
+
   app.use((_, res) => res.status(404).json({ error: "Not found" }));
 
   // attach socket initialization helper

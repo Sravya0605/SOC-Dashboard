@@ -12,12 +12,21 @@ export async function getMetrics(alerts) {
 
   try {
     const [total, perSeverityRaw, alertsPerMin] = await Promise.all([
-      alerts.countDocuments(),
-      alerts.aggregate([{ $group: { _id: "$severity", count: { $sum: 1 } } }]).toArray(),
-      alerts.countDocuments({ timestamp: { $gte: new Date(Date.now() - 60_000) } })
+      alerts.countDocuments().catch(err => {
+        console.error("Error counting total documents:", err.message);
+        return 0;
+      }),
+      alerts.aggregate([{ $group: { _id: "$severity", count: { $sum: 1 } } }]).toArray().catch(err => {
+        console.error("Error aggregating by severity:", err.message);
+        return [];
+      }),
+      alerts.countDocuments({ timestamp: { $gte: new Date(Date.now() - 60_000) } }).catch(err => {
+        console.error("Error counting recent documents:", err.message);
+        return 0;
+      })
     ]);
 
-    const perSeverity = perSeverityRaw.map(x => ({ name: x._id, value: x.count }));
+    const perSeverity = (perSeverityRaw || []).map(x => ({ name: x._id, value: x.count }));
 
     cache = { total, perSeverity, alertsPerMin };
     cacheTime = Date.now();
